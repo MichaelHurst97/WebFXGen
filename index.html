@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Audio Player</title>
+    <style>
+        #waveform {
+            width: 600px;
+            height: 200px;
+            border: 1px solid black;
+            position: relative;
+            border-radius: 10px;
+        }
+        #progress {
+            height: 100%;
+            width: 2px;
+            background: red;
+            position: absolute;
+            top: 0;
+            left: 0;
+        }
+    </style>
+</head>
+<body>
+    <input type="text" id="textInput" placeholder="Geben Sie Text ein">
+    <button id="submitButton">Absenden</button>
+    <div id="waveform" draggable="true">
+        <div id="progress"></div>
+    </div>
+    <audio id="audioPlayer" style="display:none;"></audio>
+    <script src="https://cdn.jsdelivr.net/npm/elevenlabs/dist/index.min.js"></script>
+    <script type="module">
+        import { ElevenLabsClient } from 'https://cdn.jsdelivr.net/npm/elevenlabs/+esm';
+
+        const textInput = document.getElementById('textInput');
+        const submitButton = document.getElementById('submitButton');
+        const waveform = document.getElementById('waveform');
+        const progress = document.getElementById('progress');
+        const audioPlayer = document.getElementById('audioPlayer');
+        let audioContext, analyser, isPlaying = false;
+        let audioBuffer;
+
+        submitButton.addEventListener('click', async () => {
+            const text = textInput.value;
+            if (text) {
+                const client = new ElevenLabsClient({ apiKey: "" });
+                try {
+                    const response = await client.textToSoundEffects.convert({
+                        text: text,
+                        duration_seconds: null,
+                        prompt_influence: 0.3
+                    });
+
+                    console.log('API Response:', response);
+
+                    // Lesen der ReadableStream Response
+                    const reader = response.reader;
+                    const chunks = [];
+                    while (true) {
+                        const { done, value } = await reader.read();
+                        if (done) break;
+                        chunks.push(value);
+                    }
+
+                    // Chunks zu Blob
+                    const blob = new Blob(chunks, { type: 'audio/mpeg' });
+                    
+                    // Ändern des Dateinamens
+                    const filename = text.replace(/\s+/g, '_').toLowerCase() + '.mp3';
+                    
+                    // Sende Blobs an Flask Server
+                    const formData = new FormData();
+                    formData.append('audio', blob, filename);
+                    
+                    const saveResponse = await fetch('/save-audio', {
+                        method: 'POST',
+                        body: formData
+                    });
+                    
+                    const { filename: savedFilename } = await saveResponse.json();
+                    
+                    // Audio-Quelle
+                    audioPlayer.src = `/audio/${savedFilename}`;
+                    
+                    // Initialisiere AudioContext und Analyser
+                    audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                    analyser = audioContext.createAnalyser();
+                    const source = audioContext.createMediaElementSource(audioPlayer);
+                    source.connect(analyser);
+                    analyser.connect(audioContext.destination);
+                    
+                    // Lade AudioBuffer für die Wellenform
+                    const response2 = await fetch(`/audio/${savedFilename}`);
+                    const arrayBuffer = await response2.arrayBuffer();
+                    audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+                    
+                    // Zeichnen der Wellenform
+                    drawWaveform();
+                } catch (error) {
+                    console.error('Fehler bei der API-Anfrage:', error);
+                }
+            }
+        });
+
+        waveform.addEventListener('click', (event) => {
+            const rect = waveform.getBoundingClientRect();
+            const x = event.clientX - rect.left;
+            const clickPosition = x / waveform.clientWidth;
+            audioPlayer.currentTime = clickPosition * audioPlayer.duration;
+            
+            if (!isPlaying) {
+                playAudio();
+            }
+        });
+
+        waveform.addEventListener('dragstart', (event) => {
+            event.dataTransfer.setData('text/plain', audioPlayer.src);
+        });
+
+        function drawWaveform() {
+            const canvas = document.createElement('canvas');
+            canvas.width = waveform.clientWidth;
+            canvas.height = waveform.clientHeight;
+            waveform.innerHTML = '';
+            waveform.appendChild(canvas);
+            const ctx = canvas.getContext('2d');
+
+            const data = audioBuffer.getChannelData(0);
+            const step = Math.ceil(data.length / (canvas.width / 2));
+            const amp = canvas.height / 2;
+
+            ctx.fillStyle = 'rgb(200, 200, 200)';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            ctx.lineWidth = 1;
+            ctx.strokeStyle = 'rgb(0, 0, 0)';
+            ctx.beginPath();
+
+            for (let i = 0; i < canvas.width / 2; i++) {
+                const min = Math.min(...data.slice(i * step, (i + 1) * step));
+                const max = Math.max(...data.slice(i * step, (i + 1) * step));
+                ctx.moveTo(i, (1 + min) * amp);
+                ctx.lineTo(i, (1 + max) * amp);
+            }
+
+            ctx.stroke();
+        }
+
+        function playAudio() {
+            audioPlayer.play();
+            isPlaying = true;
+            requestAnimationFrame(updateProgress);
+        }
+
+        function pauseAudio() {
+            audioPlayer.pause();
+            isPlaying = false;
+        }
+
+        function updateProgress() {
+            if (isPlaying) {
+                const progressPercent = audioPlayer.currentTime / audioPlayer.duration;
+                progress.style.left = `${progressPercent * 100}%`;
+                requestAnimationFrame(updateProgress);
+            }
+        }
+    </script>
+</body>
+</html>
